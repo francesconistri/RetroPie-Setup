@@ -170,7 +170,7 @@ function get_os_version() {
 
     local error=""
     case "$__os_id" in
-        Raspbian|Debian)
+        Raspbian|Debian|Bunsenlabs)
             # get major version (8 instead of 8.0 etc)
             __os_debian_ver="${__os_release%%.*}"
 
@@ -180,7 +180,7 @@ function get_os_version() {
             fi
 
             # we still allow Raspbian 8 (jessie) to work (We show an popup in the setup module)
-            if compareVersions "$__os_debian_ver" lt 8; then
+            if [[ "$__os_debian_ver" -lt 8 ]]; then
                 error="You need Raspbian/Debian Stretch or newer"
             fi
 
@@ -203,7 +203,7 @@ function get_os_version() {
             # we provide binaries for RPI on Raspbian 9/10
             if isPlatform "rpi" && \
                isPlatform "32bit" && \
-               compareVersions "$__os_debian_ver" gt 9 && compareVersions "$__os_debian_ver" lt 11; then
+               [[ "$__os_debian_ver" -gt 9 && "$__os_debian_ver" -lt 11 ]]; then
                # only set __has_binaries if not already set
                [[ -z "$__has_binaries" ]] && __has_binaries=1
             fi
@@ -240,6 +240,15 @@ function get_os_version() {
                     __os_debian_ver="10"
                 else
                     __os_ubuntu_ver="20.04"
+                    __os_debian_ver="11"
+                fi
+            fi
+            if [[ "$__os_desc" == LMDE* ]]; then
+                if compareVersions "$__os_release" lt 4; then
+                    error="You need Linux Mint Debian Edition 4 or newer"
+                elif compareVersions "$__os_release" lt 5; then
+                    __os_debian_ver="10"
+                else
                     __os_debian_ver="11"
                 fi
             fi
@@ -319,19 +328,27 @@ function get_rpi_video() {
     local pkgconfig="/opt/vc/lib/pkgconfig"
 
     if [[ -z "$__has_kms" ]]; then
-        # in chroot, use kms by default for rpi4 target
-        [[ "$__chroot" -eq 1 ]] && isPlatform "rpi4" && __has_kms=1
-        # detect driver via inserted module / platform driver setup
-        [[ -d "/sys/module/vc4" ]] && __has_kms=1
+        if [[ "$__chroot" -eq 1 ]]; then
+            # in chroot, use kms by default for rpi4 or Debian 11 (bullseye) or newer
+            if isPlatform "rpi4" || [[ "$__os_debian_ver" -ge 11 ]]; then
+                __has_kms=1
+            fi
+        else
+            # detect driver via inserted module / platform driver setup
+            [[ -d "/sys/module/vc4" ]] && __has_kms=1
+        fi
     fi
 
     if [[ "$__has_kms" -eq 1 ]]; then
         __platform_flags+=(mesa kms)
         if [[ -z "$__has_dispmanx" ]]; then
-            # in a chroot, unless __has_dispmanx is set, default to fkms (adding dispmanx flag)
-            [[ "$__chroot" -eq 1 ]] && __has_dispmanx=1
-            # if running fkms driver, add dispmanx flag
-            [[ "$(ls -A /sys/bus/platform/drivers/vc4_firmware_kms/*.firmwarekms 2>/dev/null)" ]] && __has_dispmanx=1
+            if [[ "$__chroot" -eq 1 ]]; then
+                # in a chroot default to fkms (supporting dispmanx) when debian is older than 11 (bullseye)
+                [[ "$__os_debian_ver" -lt 11 ]] && __has_dispmanx=1
+            else
+                # if running fkms driver, add dispmanx flag
+                [[ "$(ls -A /sys/bus/platform/drivers/vc4_firmware_kms/*.firmwarekms 2>/dev/null)" ]] && __has_dispmanx=1
+            fi
         fi
         [[ "$__has_dispmanx" -eq 1 ]] && __platform_flags+=(dispmanx)
     else
@@ -410,6 +427,9 @@ function get_platform() {
                         *tegra194*)
                             __platform="xavier"
                             ;;
+                        *rockpro64*)
+                            __platform="rockpro64"
+                            ;;
                     esac
                 elif [[ -e "/sys/devices/soc0/family" ]]; then
                     case "$(tr -d '\0' < /sys/devices/soc0/family)" in
@@ -430,18 +450,10 @@ function get_platform() {
                             ;;
                     esac
                 else
-                    case $architecture in
-                        i686|x86_64|amd64)
-                            __platform="x86"
-                            ;;
-                    esac
+                    __platform="$architecture"
                 fi
                 ;;
         esac
-    fi
-
-    if ! fnExists "platform_${__platform}"; then
-        fatalError "Unknown platform - please manually set the __platform variable to one of the following: $(compgen -A function platform_ | cut -b10- | paste -s -d' ')"
     fi
 
     # check if we wish to target kms for platform
@@ -453,7 +465,13 @@ function get_platform() {
     fi
 
     set_platform_defaults
-    platform_${__platform}
+
+    # if we have a function for the platform, call it, otherwise use the default "native" one.
+    if fnExists "platform_${__platform}"; then
+        platform_${__platform}
+    else
+        platform_native
+    fi
 }
 
 function set_platform_defaults() {
@@ -515,6 +533,11 @@ function platform_rpi2() {
     __platform_flags+=(rpi gles)
 }
 
+function platform_rockpro64() {
+    cpu_armv8 "cortex-a53"
+    __platform_flags+=(gles kms)
+}
+
 function platform_rpi3() {
     cpu_armv8 "cortex-a53"
     __platform_flags+=(rpi gles)
@@ -545,12 +568,12 @@ function platform_odroid-xu() {
 }
 
 function platform_tegra-x1() {
-    cpu_armv8 "cortex-a57"
+    cpu_armv8 "cortex-a57+crypto"
     __platform_flags+=(x11 gl)
 }
 
 function platform_tegra-x2() {
-    cpu_armv8 "native"
+    cpu_armv8 "cortex-a57+crypto"
     __platform_flags+=(x11 gl)
 }
 
@@ -586,7 +609,7 @@ function platform_tinker() {
     __platform_flags+=(kms gles)
 }
 
-function platform_x86() {
+function platform_native() {
     __default_cpu_flags="-march=native"
     __platform_flags+=(gl)
     if [[ "$__has_kms" -eq 1 ]]; then
@@ -594,10 +617,8 @@ function platform_x86() {
     else
         __platform_flags+=(x11)
     fi
-}
-
-function platform_generic-x11() {
-    __platform_flags+=(x11 gl)
+    # add x86 platform flag for x86/x86_64 archictures.
+    [[ "$__platform_arch" =~ (i386|i686|x86_64) ]] && __platform_flags+=(x86)
 }
 
 function platform_armv7-mali() {
